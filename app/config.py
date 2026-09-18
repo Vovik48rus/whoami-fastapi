@@ -22,14 +22,15 @@ class Settings:
     # контейнера (обычно совпадает с container ID в Docker).
     node_name: str = os.getenv("NODE_NAME", "")
 
-    # Порт, на котором приложение слушает HTTP (без TLS! см. ограничение №3 —
-    # терминацией TLS занимается Apache/Nginx перед этим приложением).
+    # Порт, на котором приложение слушает HTTP. TLS-терминацией занимается
+    # Apache/Nginx перед этим приложением, поэтому uvicorn запускается без
+    # сертификатов (--ssl-keyfile/--ssl-certfile).
     port: int = int(os.getenv("PORT", "8000"))
 
     # --- Внешнее хранилище (Redis) ---------------------------------------
-    # Redis должен быть вынесен в отдельный узел/контейнер, не совпадающий
-    # с нодами приложения. Тогда потеря любой из нод FastAPI не приводит
-    # к потере данных счётчиков/сессий (ограничение №2 и №4).
+    # Redis вынесен в отдельный узел/контейнер, не совпадающий с нодами
+    # приложения. Потеря любой из нод FastAPI не приводит к потере данных
+    # счётчиков и сессий.
     redis_host: str = os.getenv("REDIS_HOST", "redis")
     redis_port: int = int(os.getenv("REDIS_PORT", "6379"))
     redis_db: int = int(os.getenv("REDIS_DB", "0"))
@@ -41,7 +42,7 @@ class Settings:
     redis_socket_timeout: float = float(os.getenv("REDIS_SOCKET_TIMEOUT", "0.5"))
 
     # TTL пользовательской сессии в секундах (сессия хранится в Redis, а не
-    # в памяти процесса и не в локальных файлах — ограничение №4).
+    # в памяти процесса и не в локальных файлах).
     session_ttl_seconds: int = int(os.getenv("SESSION_TTL_SECONDS", "3600"))
     session_cookie_name: str = os.getenv("SESSION_COOKIE_NAME", "whoami_session")
 

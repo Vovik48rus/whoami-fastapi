@@ -1,13 +1,13 @@
 version: "3.9"
 
-# Демонстрационная схема для лабораторной работы №3:
+# Демонстрационная схема развёртывания:
 #   client -> nginx (L7, round-robin, без TLS-логики в самом приложении)
 #              -> whoami-node-1 (FastAPI)
 #              -> whoami-node-2 (FastAPI)
 #   обе ноды приложения используют ОБЩИЙ внешний Redis для счётчиков/сессий.
 #
-# TLS в этом compose сознательно не настроен — сертификаты и SSL-терминация
-# добавляются позже поверх сервиса nginx в рамках лабораторной работы №3.
+# TLS в этом compose сознательно не настроен: сертификаты и SSL-терминация
+# выполняются на уровне реверс-прокси (Nginx/Apache).
 
 services:
   redis:
@@ -69,7 +69,7 @@ services:
     container_name: whoami-nginx
     restart: unless-stopped
     ports:
-      - "8080:80"   # плоский HTTP; HTTPS/443 добавляется в лаб. работе №3
+      - "8080:80"   # плоский HTTP; HTTPS/443 терминируется на уровне Nginx
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
