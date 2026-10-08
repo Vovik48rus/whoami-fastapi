@@ -8,8 +8,9 @@ with `nginx -t` or `apachectl configtest`.
 1. Add an `async def` handler in the matching section of `app/main.py` (the file is
    split by banner comments: identity, middleware, whoami, health, shared state,
    sessions, helpers).
-2. If it does work or touches data, return `served_by_node`. If it uses Redis, follow
-   the 503 pattern from `AGENTS.md` and add any new keys to `reference.md`.
+2. If it does work or touches data, return `served_by_node`. If it uses the database,
+   add a method to `DatabaseManager` (rules in `reference.md`), follow the 503 pattern
+   from `AGENTS.md` and document any new table or column in `reference.md`.
 3. Add a row to the endpoint table in `README.md` and `reference.md`.
 4. Run the smoke test.
 
@@ -118,10 +119,10 @@ Publish several `A` records for one name, pointing at different proxy or node
 addresses. DNS has no health awareness, resolvers cache answers, and record order
 rotates. Check with repeated `dig +short example.local` and `getent ahosts example.local`.
 `/etc/hosts` does not rotate; use dnsmasq or BIND for a lab. Switching nodes between
-requests is safe because state lives in Redis.
+requests is safe because state lives in PostgreSQL.
 
 ## Other Nginx algorithms
 
 `least_conn;` balances by active connections. `ip_hash;` gives stickiness and is not
-needed here: sessions live in Redis, and the demo shows that stickiness is unnecessary.
+needed here: sessions live in PostgreSQL, and the demo shows that stickiness is unnecessary.
 Do not enable sticky "for safety"; it hides state-storage bugs.
