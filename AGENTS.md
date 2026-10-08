@@ -9,9 +9,9 @@ The goal is infrastructure artifacts, not a rich app — keep the code small.
 ## Stack
 
 - Python 3.12 (`python:3.12-slim`; code needs >= 3.10 for `X | None`)
-- FastAPI 0.115.0, uvicorn[standard] 0.30.6, redis-py 5.0.8 (`redis.asyncio`),
+- FastAPI 0.115.0, uvicorn[standard] 0.30.6, asyncpg 0.30.0,
   pydantic 2.9.2 (pinned, not used directly)
-- Redis 7 (`redis:7-alpine`, AOF on) as the only shared state
+- PostgreSQL 16 (`postgres:16-alpine`, named volume) as the only shared state
 - Nginx 1.27 as the reverse proxy (`nginx.conf`; not a service in compose)
 
 ## Commands
@@ -21,20 +21,22 @@ The goal is infrastructure artifacts, not a rich app — keep the code small.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# Redis for local runs
-docker run -d --name whoami-redis-dev -p 6379:6379 redis:7-alpine
+# PostgreSQL for local runs (the app creates its own tables)
+docker run -d --name whoami-pg-dev -p 5432:5432 -e POSTGRES_DB=whoami \
+  -e POSTGRES_USER=whoami -e POSTGRES_PASSWORD=whoami postgres:16-alpine
+export POSTGRES_HOST=localhost POSTGRES_PASSWORD=whoami
 
 # one node with reload
-NODE_NAME=dev REDIS_HOST=localhost uvicorn app.main:app --reload --port 8000
+NODE_NAME=dev uvicorn app.main:app --reload --port 8000
 
-# two nodes sharing one Redis (no Docker needed for the app)
-NODE_NAME=node-1 REDIS_HOST=localhost uvicorn app.main:app --port 8001
-NODE_NAME=node-2 REDIS_HOST=localhost uvicorn app.main:app --port 8002
+# two nodes sharing one PostgreSQL (no Docker needed for the app)
+NODE_NAME=node-1 uvicorn app.main:app --port 8001
+NODE_NAME=node-2 uvicorn app.main:app --port 8002
 
-# full stack: redis + app1 (:8001) + app2 (:8002). There is NO nginx service.
+# full stack: postgres + app1 (:8001) + app2 (:8002). There is NO nginx service.
 docker compose up --build -d
 docker compose logs -f app1 app2
-docker compose down          # keeps Redis data; add -v to wipe it
+docker compose down          # keeps PostgreSQL data; add -v to wipe it
 
 # smoke test (run after any behavior change)
 curl -s localhost:8001/visits; curl -s localhost:8002/visits   # one shared, growing counter
@@ -45,28 +47,31 @@ curl -s localhost:8001/api                                     # node identity +
 python -m pytest -q
 ```
 
-Expected with Redis stopped: `/`, `/api`, `/health` -> 200; `/health/ready`,
+Expected with PostgreSQL stopped: `/`, `/api`, `/health` -> 200; `/health/ready`,
 `/visits`, `/session` -> 503. More scenarios: `docs/agents/operations.md`.
 
 ## Boundaries
 
 **Always**
-- Keep state shared between requests in Redis, accessed only through
-  `app/redis_client.py`. Wrap `RedisError` and `OSError` into `RedisUnavailable`.
-- Turn `RedisUnavailable` into a `503` JSON response (shape below), never a 500.
+- Keep state shared between requests in PostgreSQL, accessed only through
+  `app/db_client.py` (`DatabaseManager`; handlers never touch connections or SQL).
+  Database and socket errors become `StorageUnavailable` there.
+- Turn `StorageUnavailable` into a `503` JSON response (shape below), never a 500.
 - Put `served_by_node` in the JSON of every endpoint that does work. The
   `X-Node-Name/Hostname/Pid` middleware stays on all responses.
 - Write handlers as `async def` with non-blocking calls only.
 - Read configuration through `Settings` in `app/config.py` (env vars only).
 - Update `README.md` and these docs in the same change when endpoints, env vars,
-  ports, commands or Redis keys change.
+  ports, commands, tables or columns change.
 - Keep each file's existing line endings (the whole repo is CRLF).
-- Say explicitly what you could not run (Docker, Redis, Nginx).
+- Say explicitly what you could not run (Docker, PostgreSQL, Nginx).
 
 **Ask first**
 - Changing a public contract: paths, JSON field names, `X-Node-*` headers, the 503
-  shape, or existing Redis key names/formats.
+  shape, or existing table/column names and formats.
 - Adding dependencies, a second datastore, auth or rate limiting.
+- Changing the schema of an existing table: the app only runs `CREATE TABLE IF NOT EXISTS`,
+  so a live database keeps the old definition and there are no migrations.
 - Changing ports, service/container names or the compose network.
 - Reformatting files or converting line endings.
 - Fixing anything from `docs/agents/known-issues.md` that you were not asked to fix.
@@ -76,20 +81,21 @@ Expected with Redis stopped: `/`, `/api`, `/health` -> 200; `/health/ready`,
   Per-node identity values (`NODE_ID`, `PID`, `START_TIME`) are fine.
 - Handle TLS in the app: no `--ssl-*` flags, certificates, keys or HTTPS redirects.
   TLS terminates on Nginx/Apache.
-- Store sessions anywhere but Redis (no in-memory, file or client-side cookie sessions).
-- Create Redis clients outside `redis_client.py`, or block the event loop
-  (`time.sleep`, `requests`, sync `redis`).
+- Store sessions anywhere but PostgreSQL (no in-memory, file or client-side cookie sessions).
+- Open database connections or pools outside `db_client.py`, build SQL with f-strings,
+  or block the event loop (`time.sleep`, `requests`, sync drivers such as `psycopg2`).
 - Add `--workers` to uvicorn, sticky sessions, or per-node logic like `if NODE_NAME == ...`.
 - Use `/visits`, `/session` or `/health/ready` as a load-balancer health check
-  (they mutate state or depend on Redis). Use `/health`.
+  (they mutate state or depend on PostgreSQL). Use `/health`.
 - Commit secrets, certificates, keys, `.env` or `__pycache__`.
 
 ## Code conventions
 
 No formatter or linter is configured. Match the surrounding code; do not reformat
 unrelated lines. Type-hint everything. Comments and docstrings are in Russian
-(match that); identifiers, JSON keys and Redis keys are English. Redis keys use the
-`whoami:<area>:<name>` prefix.
+(match that); identifiers, JSON keys, table and column names are English. Tables use
+the `whoami_` prefix. SQL lives in module-level constants in `db_client.py` and takes
+values as `$n` parameters.
 
 A data endpoint looks like this:
 
@@ -97,13 +103,13 @@ A data endpoint looks like this:
 @app.get("/example")
 async def example() -> JSONResponse:
     try:
-        value = await redis_manager.incr("whoami:example:counter")
-    except RedisUnavailable as exc:
+        value = await db_manager.incr_counter("example")  # a new DatabaseManager method
+    except StorageUnavailable as exc:
         return JSONResponse(
             status_code=503,
             content={
                 "error": "storage_unavailable",
-                "detail": "Хранилище (Redis) недоступно.",
+                "detail": "Хранилище (PostgreSQL) недоступно.",
                 "served_by_node": NODE_ID,
                 "reason": str(exc),
             },
@@ -111,13 +117,13 @@ async def example() -> JSONResponse:
     return JSONResponse(content={"value": value, "served_by_node": NODE_ID})
 ```
 
-Do not write `except Exception: pass` around Redis, and do not call
-`redis.Redis(...)` from `main.py`.
+Do not write `except Exception: pass` around database calls, and do not import
+`asyncpg` or call `asyncpg.connect(...)` from `main.py`.
 
 ## Where things live
 
-- `app/main.py` — all endpoints, node identity (`NODE_ID`), `X-Node-*` middleware
-- `app/redis_client.py` — `RedisManager` (lazy pool, 0.5 s timeouts), `RedisUnavailable`
+- `app/main.py` — all endpoints, node identity (`NODE_ID`), `X-Node-*` middleware, `lifespan` (session purge task, pool shutdown)
+- `app/db_client.py` — `DatabaseManager` (lazy asyncpg pool, 1 s timeouts, schema creation, all SQL), `StorageUnavailable`
 - `app/config.py` — `Settings` dataclass
 - `nginx.conf` — upstream + server fragment for `conf.d/`, not a full nginx config
 
@@ -138,6 +144,11 @@ Do not write `except Exception: pass` around Redis, and do not call
 - `container_id` is often `null` on cgroup v2; identity falls back to the hostname.
 - The compose healthcheck uses `python -c urllib...` because the slim image has no `curl`.
 - `GET /visits` increments the counter on every call, including prefetch and scanners.
+- The schema is created by the app on the first successful connection (advisory lock,
+  `IF NOT EXISTS`), so a fresh database needs no init script. The database user needs
+  `CREATE` on it. PostgreSQL has no TTL: sessions expire via `expires_at` and a per-node
+  purge task (`lifespan`).
+- The `/health/ready` JSON field is `postgres` (it was `redis` before the migration).
 
 ## Git
 
@@ -146,8 +157,8 @@ per commit, and mention in the body which boundary above the change touches.
 
 ## Deeper docs (read only when relevant)
 
-- `docs/agents/reference.md` — endpoints, response contracts, Redis keys, env vars
-- `docs/agents/operations.md` — compose, failure scenarios, Redis inspection, Nginx pitfalls
+- `docs/agents/reference.md` — endpoints, response contracts, database schema, env vars
+- `docs/agents/operations.md` — compose, failure scenarios, PostgreSQL inspection, Nginx pitfalls
 - `docs/agents/recipes.md` — new endpoint/env var/node, TLS, L4 stream, Apache, DNS round-robin
-- `docs/agents/testing.md` — verified pytest + fakeredis setup and its pitfalls
+- `docs/agents/testing.md` — verified pytest setup against a real PostgreSQL and its pitfalls
 - `docs/agents/known-issues.md` — documented problems and doc/config drift (K1..K25)

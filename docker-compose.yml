@@ -4,22 +4,28 @@ version: "3.9"
 #   client -> nginx (L7, round-robin, без TLS-логики в самом приложении)
 #              -> whoami-node-1 (FastAPI)
 #              -> whoami-node-2 (FastAPI)
-#   обе ноды приложения используют ОБЩИЙ внешний Redis для счётчиков/сессий.
+#   обе ноды приложения используют ОБЩИЙ внешний PostgreSQL для счётчиков/сессий.
 #
 # TLS в этом compose сознательно не настроен: сертификаты и SSL-терминация
 # выполняются на уровне реверс-прокси (Nginx/Apache).
 
 services:
-  redis:
-    image: redis:7-alpine
-    container_name: whoami-redis
+  postgres:
+    image: postgres:16-alpine
+    container_name: whoami-postgres
     restart: unless-stopped
-    # AOF persistence — чтобы счётчики/сессии переживали перезапуск самого Redis.
-    command: ["redis-server", "--appendonly", "yes"]
+    # Учётные данные только для лабораторного стенда; для общего окружения
+    # задайте POSTGRES_PASSWORD снаружи (экспорт в shell или файл .env,
+    # который читает сам docker compose для подстановки переменных).
+    environment:
+      POSTGRES_DB: whoami
+      POSTGRES_USER: whoami
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-whoami}
+    # Данные переживают перезапуск контейнера благодаря именованному volume.
     volumes:
-      - redis-data:/data
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "pg_isready -U whoami -d whoami"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -32,10 +38,13 @@ services:
     restart: unless-stopped
     environment:
       NODE_NAME: node-1
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: whoami
+      POSTGRES_USER: whoami
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-whoami}
     depends_on:
-      redis:
+      postgres:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
@@ -53,10 +62,13 @@ services:
     restart: unless-stopped
     environment:
       NODE_NAME: node-2
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: whoami
+      POSTGRES_USER: whoami
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-whoami}
     depends_on:
-      redis:
+      postgres:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
@@ -73,5 +85,5 @@ networks:
     driver: bridge
 
 volumes:
-  redis-data:
+  postgres-data:
 
