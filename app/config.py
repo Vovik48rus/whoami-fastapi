@@ -3,7 +3,7 @@
 
 Все параметры задаются через переменные окружения, чтобы одинаковый образ
 можно было запускать как несколько независимых нод с разными идентификаторами
-(NODE_NAME) и общим внешним хранилищем (Redis), не пересобирая контейнер.
+(NODE_NAME) и общим внешним хранилищем (PostgreSQL), не пересобирая контейнер.
 """
 import os
 from dataclasses import dataclass
@@ -27,23 +27,33 @@ class Settings:
     # сертификатов (--ssl-keyfile/--ssl-certfile).
     port: int = int(os.getenv("PORT", "8000"))
 
-    # --- Внешнее хранилище (Redis) ---------------------------------------
-    # Redis вынесен в отдельный узел/контейнер, не совпадающий с нодами
+    # --- Внешнее хранилище (PostgreSQL) ----------------------------------
+    # PostgreSQL вынесен в отдельный узел/контейнер, не совпадающий с нодами
     # приложения. Потеря любой из нод FastAPI не приводит к потере данных
     # счётчиков и сессий.
-    redis_host: str = os.getenv("REDIS_HOST", "redis")
-    redis_port: int = int(os.getenv("REDIS_PORT", "6379"))
-    redis_db: int = int(os.getenv("REDIS_DB", "0"))
-    redis_password: str | None = os.getenv("REDIS_PASSWORD") or None
+    postgres_host: str = os.getenv("POSTGRES_HOST", "postgres")
+    postgres_port: int = int(os.getenv("POSTGRES_PORT", "5432"))
+    postgres_db: str = os.getenv("POSTGRES_DB", "whoami")
+    postgres_user: str = os.getenv("POSTGRES_USER", "whoami")
+    postgres_password: str | None = os.getenv("POSTGRES_PASSWORD") or None
 
-    # Таймауты, чтобы при падении Redis приложение не подвисало,
+    # Таймауты, чтобы при падении PostgreSQL приложение не подвисало,
     # а быстро отвечало ошибкой 503 конкретному эндпоинту.
-    redis_connect_timeout: float = float(os.getenv("REDIS_CONNECT_TIMEOUT", "0.5"))
-    redis_socket_timeout: float = float(os.getenv("REDIS_SOCKET_TIMEOUT", "0.5"))
+    # connect_timeout ограничивает и установку соединения, и ожидание
+    # свободного соединения из пула; command_timeout - выполнение запроса.
+    postgres_connect_timeout: float = float(os.getenv("POSTGRES_CONNECT_TIMEOUT", "1.0"))
+    postgres_command_timeout: float = float(os.getenv("POSTGRES_COMMAND_TIMEOUT", "1.0"))
 
-    # TTL пользовательской сессии в секундах (сессия хранится в Redis, а не
-    # в памяти процесса и не в локальных файлах).
+    # Максимальный размер пула соединений на одну ноду. Учитывайте
+    # max_connections самого PostgreSQL (по умолчанию 100) * число нод.
+    postgres_pool_max: int = int(os.getenv("POSTGRES_POOL_MAX", "10"))
+
+    # TTL пользовательской сессии в секундах (сессия хранится в PostgreSQL, а не
+    # в памяти процесса и не в локальных файлах). В PostgreSQL нет встроенного
+    # TTL: срок жизни задаётся колонкой expires_at, а просроченные строки
+    # периодически удаляются фоновой задачей каждой ноды.
     session_ttl_seconds: int = int(os.getenv("SESSION_TTL_SECONDS", "3600"))
+    session_purge_interval_seconds: int = int(os.getenv("SESSION_PURGE_INTERVAL_SECONDS", "60"))
     session_cookie_name: str = os.getenv("SESSION_COOKIE_NAME", "whoami_session")
 
     # Cookie должна работать и через HTTP, и через HTTPS-терминацию на

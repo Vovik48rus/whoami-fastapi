@@ -12,25 +12,27 @@ NODE_NAME, PID, ID контейнера) и эхом заголовков зап
 - Работает как несколько независимых инстансов (нод) за балансировщиком —
   каждый ответ однозначно показывает, какая нода его обработала.
 - Общее состояние (счётчики, лог запросов, сессии) хранится не в памяти
-  процесса и не в файле на диске ноды, а во внешнем Redis. Падение одной
+  процесса и не в файле на диске ноды, а во внешнем PostgreSQL. Падение одной
   ноды не приводит к потере данных и не мешает остальным нодам продолжать
-  работать с тем же состоянием. Если недоступен сам Redis — зависящие от
+  работать с тем же состоянием. Если недоступен сам PostgreSQL — зависящие от
   него эндпоинты возвращают 503, а не роняют всё приложение.
 - Приложение слушает только plain HTTP (uvicorn без ssl_certfile/ssl_keyfile).
   TLS-терминация выполняется на Apache/Nginx перед этим приложением.
 - Пользовательская сессия идентифицируется cookie с случайным ID, а её
-  данные (счётчик визитов сессии) хранятся в Redis с TTL — не в памяти
-  процесса и не в локальном файле.
+  данные (счётчик визитов сессии) хранятся в PostgreSQL с TTL (колонка
+  expires_at) — не в памяти процесса и не в локальном файле.
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import platform
 import socket
 import sys
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request, Response
@@ -38,12 +40,38 @@ from fastapi.responses import JSONResponse, PlainTextResponse, HTMLResponse
 from pydantic import BaseModel
 
 from .config import settings
-from .redis_client import redis_manager, RedisUnavailable
+from .db_client import db_manager, StorageUnavailable
+
+
+async def _purge_sessions_loop() -> None:
+    """
+    Фоновая очистка просроченных сессий (в PostgreSQL нет встроенного TTL).
+    Каждая нода запускает свою копию; DELETE идемпотентен, поэтому ноды
+    не мешают друг другу. Недоступность БД не должна убивать задачу.
+    """
+    while True:
+        await asyncio.sleep(settings.session_purge_interval_seconds)
+        with contextlib.suppress(StorageUnavailable):
+            await db_manager.purge_expired_sessions()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    purge_task = asyncio.create_task(_purge_sessions_loop())
+    try:
+        yield
+    finally:
+        purge_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await purge_task
+        await db_manager.close()
+
 
 app = FastAPI(
     title="whoami-fastapi",
     description="FastAPI-аналог traefik/whoami: идентификация ноды и эхо заголовков запроса",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 START_TIME = time.monotonic()
@@ -186,23 +214,23 @@ async def whoami_ui(request: Request) -> str:
 # --------------------------------------------------------------------------- #
 @app.get("/health")
 async def health_liveness() -> dict:
-    """Liveness: отвечает, пока жив сам процесс — не зависит от Redis."""
+    """Liveness: отвечает, пока жив сам процесс — не зависит от PostgreSQL."""
     return {"status": "ok", "node_name": NODE_ID, "hostname": HOSTNAME}
 
 
 @app.get("/health/ready")
 async def health_readiness() -> JSONResponse:
     """Readiness: дополнительно проверяет доступность внешнего хранилища."""
-    redis_ok = await redis_manager.ping()
-    status_code = 200 if redis_ok else 503
+    db_ok = await db_manager.ping()
+    status_code = 200 if db_ok else 503
     return JSONResponse(
         status_code=status_code,
-        content={"status": "ok" if redis_ok else "degraded", "node_name": NODE_ID, "redis": redis_ok},
+        content={"status": "ok" if db_ok else "degraded", "node_name": NODE_ID, "postgres": db_ok},
     )
 
 
 # --------------------------------------------------------------------------- #
-# Общее состояние во внешнем хранилище (Redis) — переживает падение
+# Общее состояние во внешнем хранилище (PostgreSQL) — переживает падение
 # любой отдельной ноды приложения.
 # --------------------------------------------------------------------------- #
 @app.get("/visits")
@@ -213,19 +241,17 @@ async def visits(request: Request) -> JSONResponse:
     сколько бы нод ни стояло за Nginx/Apache, счётчик будет одним и тем же.
     """
     try:
-        total = await redis_manager.incr("whoami:global:visits")
-        await redis_manager.lpush_capped(
-            "whoami:global:recent_requests",
-            f"{datetime.now(timezone.utc).isoformat()} node={NODE_ID} "
-            f"client={request.client.host if request.client else '-'}",
-            max_len=20,
+        total = await db_manager.record_visit(
+            node=str(NODE_ID),
+            client=request.client.host if request.client else "-",
+            max_recent=20,
         )
-    except RedisUnavailable as exc:
+    except StorageUnavailable as exc:
         return JSONResponse(
             status_code=503,
             content={
                 "error": "storage_unavailable",
-                "detail": "Не удалось обратиться к Redis (внешнему хранилищу).",
+                "detail": "Не удалось обратиться к PostgreSQL (внешнему хранилищу).",
                 "served_by_node": NODE_ID,
                 "reason": str(exc),
             },
@@ -236,8 +262,8 @@ async def visits(request: Request) -> JSONResponse:
 @app.get("/visits/recent")
 async def visits_recent() -> JSONResponse:
     try:
-        items = await redis_manager.lrange("whoami:global:recent_requests", 0, -1)
-    except RedisUnavailable as exc:
+        items = await db_manager.recent_visits(limit=20)
+    except StorageUnavailable as exc:
         return JSONResponse(
             status_code=503,
             content={"error": "storage_unavailable", "served_by_node": NODE_ID, "reason": str(exc)},
@@ -246,13 +272,13 @@ async def visits_recent() -> JSONResponse:
 
 
 # --------------------------------------------------------------------------- #
-# Сессии в Redis (cookie с ID сессии, данные — только во внешнем хранилище)
+# Сессии в PostgreSQL (cookie с ID сессии, данные — только во внешнем хранилище)
 # --------------------------------------------------------------------------- #
 @app.get("/session")
 async def session_counter(request: Request, response: Response) -> JSONResponse:
     """
     Демонстрация "sticky-less" сессий: ID сессии живёт в cookie у клиента,
-    а счётчик визитов этой сессии — в Redis с TTL. Благодаря этому запросы
+    а счётчик визитов этой сессии — в PostgreSQL с TTL. Благодаря этому запросы
     одной сессии можно раскидывать балансировщиком по разным нодам без
     привязки к конкретному backend'у (без sticky sessions) и без риска
     потери данных при падении ноды, которая сессию создала.
@@ -261,15 +287,14 @@ async def session_counter(request: Request, response: Response) -> JSONResponse:
     if not session_id:
         session_id = uuid.uuid4().hex
 
-    key = f"whoami:session:{session_id}"
     try:
-        hits = await redis_manager.incr_with_ttl(key, settings.session_ttl_seconds)
-    except RedisUnavailable as exc:
+        hits = await db_manager.session_hit(session_id, settings.session_ttl_seconds)
+    except StorageUnavailable as exc:
         return JSONResponse(
             status_code=503,
             content={
                 "error": "storage_unavailable",
-                "detail": "Хранилище сессий (Redis) недоступно.",
+                "detail": "Хранилище сессий (PostgreSQL) недоступно.",
                 "served_by_node": NODE_ID,
                 "reason": str(exc),
             },
