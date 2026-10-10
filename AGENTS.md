@@ -2,7 +2,7 @@
 
 FastAPI clone of [traefik/whoami](https://github.com/traefik/whoami). Every response
 identifies the backend node that produced it. It is a teaching artifact for a
-reverse-proxy lab: 2+ identical instances run behind Nginx/Apache for L4/L7
+reverse-proxy lab: 2+ identical instances run behind Apache for L4/L7
 load balancing, DNS balancing, TLS termination and async request handling.
 The goal is infrastructure artifacts, not a rich app — keep the code small.
 
@@ -13,7 +13,7 @@ The goal is infrastructure artifacts, not a rich app — keep the code small.
   asyncpg 0.30.0 driver, pydantic 2.9.2 (pinned, not used directly)
 - uv 0.12.24 for dependencies: `pyproject.toml` + `uv.lock` (no `requirements.txt`)
 - PostgreSQL 16 (`postgres:16-alpine`, named volume) as the only shared state
-- Nginx 1.27 as the reverse proxy (`nginx.conf`; not a service in compose)
+- Reverse proxy: Apache httpd, outside this repo (no config file and no service in compose)
 
 ## Commands
 
@@ -39,7 +39,7 @@ NODE_NAME=dev uv run uvicorn app.main:app --reload --port 8000
 NODE_NAME=node-1 uv run uvicorn app.main:app --port 8001
 NODE_NAME=node-2 uv run uvicorn app.main:app --port 8002
 
-# full stack: postgres + app1 (:8001) + app2 (:8002). There is NO nginx service.
+# full stack: postgres + app1 (:8001) + app2 (:8002). There is NO proxy service.
 docker compose up --build -d
 docker compose logs -f app1 app2
 docker compose down          # keeps PostgreSQL data; add -v to wipe it
@@ -74,7 +74,7 @@ Expected with PostgreSQL stopped: `/`, `/api`, `/health` -> 200; `/health/ready`
 - Update `README.md` and these docs in the same change when endpoints, env vars,
   ports, commands, tables or columns change.
 - Keep each file's existing line endings (the whole repo is CRLF).
-- Say explicitly what you could not run (Docker, PostgreSQL, Nginx).
+- Say explicitly what you could not run (Docker, PostgreSQL, Apache).
 
 **Ask first**
 - Changing a public contract: paths, JSON field names, `X-Node-*` headers, the 503
@@ -91,7 +91,7 @@ Expected with PostgreSQL stopped: `/`, `/api`, `/health` -> 200; `/health/ready`
 - Keep shared data in process memory or local files (counters, caches, sessions).
   Per-node identity values (`NODE_ID`, `PID`, `START_TIME`) are fine.
 - Handle TLS in the app: no `--ssl-*` flags, certificates, keys or HTTPS redirects.
-  TLS terminates on Nginx/Apache.
+  TLS terminates on Apache.
 - Store sessions anywhere but PostgreSQL (no in-memory, file or client-side cookie sessions).
 - Create engines or sessions outside `db_client.py`, import `sqlalchemy`/`asyncpg` in
   `main.py`, write raw SQL strings or build SQL with f-strings (use the ORM/expression
@@ -151,12 +151,11 @@ Do not write `except Exception: pass` around database calls, and do not import
 - `.env` is never loaded: no dotenv, no `env_file`. `.env.example` is reference only.
   It is CRLF, so `source .env` leaves `\r` in values: `sed -i 's/\r$//' .env`.
 - `PORT` in `Settings` is unused; the port comes from the Dockerfile `CMD`.
-- `README.md` describes an Nginx balancer on `:8080`, but `docker-compose.yml` has no
-  nginx service. Nodes are published directly on `8001` and `8002`.
-- `nginx.conf` upstream `app1:8000`/`app2:8000` resolves only inside the compose
-  network. For Nginx/Apache on the host use `127.0.0.1:8001` and `:8002`.
+- `docker-compose.yml` has no proxy service. Nodes are published directly on `8001` and
+  `8002`. `app1:8000`/`app2:8000` resolve only inside the compose network; for Apache on
+  the host use `127.0.0.1:8001` and `:8002`.
 - `HEAD` returns 405 on every route; checks that use `curl -I` will fail.
-- `request.client` is the proxy address. The real client is in `X-Real-IP` /
+- `request.client` is the proxy address. The real client is in
   `X-Forwarded-For`; uvicorn trusts forwarded headers only from `127.0.0.1` by default.
 - `container_id` is often `null` on cgroup v2; identity falls back to the hostname.
 - The compose healthcheck uses `python -c urllib...` because the slim image has no `curl`.
@@ -180,7 +179,7 @@ per commit, and mention in the body which boundary above the change touches.
 ## Deeper docs (read only when relevant)
 
 - `docs/agents/reference.md` — endpoints, response contracts, database schema, env vars
-- `docs/agents/operations.md` — compose, failure scenarios, PostgreSQL inspection, Nginx pitfalls
-- `docs/agents/recipes.md` — new endpoint/env var/node, TLS, L4 stream, Apache, DNS round-robin
+- `docs/agents/operations.md` — compose, failure scenarios, PostgreSQL inspection
+- `docs/agents/recipes.md` — new endpoint/env var/node, TLS and balancing on Apache, DNS round-robin
 - `docs/agents/testing.md` — verified pytest setup against a real PostgreSQL and its pitfalls
 - `docs/agents/known-issues.md` — documented problems and doc/config drift (K1..K29)

@@ -161,7 +161,7 @@ and runs even when the others are skipped.
   turn (both "nodes" use the same database, which is exactly the shared state).
 - `TestClient` sends no proxy headers; pass them yourself
   (`headers={"X-Forwarded-For": "203.0.113.5"}`).
-- Tests do not cover compose DNS, Nginx `max_fails`, or container stop/start. Those need Docker.
+- Tests do not cover compose DNS or container stop/start. Those need Docker.
 - Do not load-test `/visits` in a test: every call updates one counter row, so
   concurrent calls queue up (K27). A burst of 20 parallel requests per node on a single
   CPU needed `POSTGRES_COMMAND_TIMEOUT` above 2 s to avoid occasional 503s.

@@ -23,7 +23,7 @@ class Settings:
     node_name: str = os.getenv("NODE_NAME", "")
 
     # Порт, на котором приложение слушает HTTP. TLS-терминацией занимается
-    # Apache/Nginx перед этим приложением, поэтому uvicorn запускается без
+    # Apache перед этим приложением, поэтому uvicorn запускается без
     # сертификатов (--ssl-keyfile/--ssl-certfile).
     port: int = int(os.getenv("PORT", "8000"))
 

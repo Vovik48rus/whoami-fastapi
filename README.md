@@ -3,7 +3,7 @@
 FastAPI-аналог [traefik/whoami](https://github.com/traefik/whoami): лёгкий
 HTTP-сервис, который на каждый запрос отвечает идентификатором обработавшей
 его ноды (hostname, IP, заголовки запроса). Предназначен для развёртывания
-нескольких инстансов за реверс-прокси Apache/Nginx с балансировкой нагрузки
+нескольких инстансов за реверс-прокси Apache с балансировкой нагрузки
 (L4/L7), DNS-балансировкой, TLS/SSL-терминацией и асинхронной обработкой
 запросов.
 
@@ -20,8 +20,7 @@ whoami-fastapi/
 ├── uv.lock               # зафиксированные версии всех зависимостей (uv)
 ├── .python-version       # версия Python для uv
 ├── Dockerfile
-├── docker-compose.yml    # 2 ноды приложения + PostgreSQL + Nginx-балансировщик
-├── nginx.conf            # пример L7-балансировки (round-robin)
+├── docker-compose.yml    # 2 ноды приложения + PostgreSQL
 └── .env.example
 ```
 
@@ -78,9 +77,9 @@ whoami-fastapi/
 **3. Приложение не терминирует TLS.**
 `uvicorn` запускается без `--ssl-keyfile`/`--ssl-certfile`, слушает только
 plain HTTP (см. `Dockerfile` и `docker-compose.yml`). Сертификаты и
-HTTPS-листенер добавляются позже на уровне Nginx/Apache перед этим
-контейнером — `nginx.conf` в проекте содержит только `listen 80` и
-комментарий о том, куда добавить `listen 443 ssl`.
+HTTPS-листенер добавляются позже на уровне Apache перед этим
+контейнером (пример — в `docs/agents/recipes.md`); в самом проекте
+прокси-конфигурации нет.
 
 **4. Сессии не в памяти и не в локальных файлах.**
 `/session` идентифицирует клиента через cookie со случайным UUID, а сами
@@ -106,29 +105,30 @@ export POSTGRES_HOST=localhost POSTGRES_PASSWORD=whoami
 NODE_NAME=local-dev uv run uvicorn app.main:app --reload
 ```
 
-## Запуск демо-стенда (2 ноды + PostgreSQL + Nginx)
+## Запуск демо-стенда (2 ноды + PostgreSQL)
 
 ```bash
 docker compose up --build
 ```
 
-- Балансировщик слушает `http://localhost:8080`
-- Обновите страницу/curl несколько раз — в `X-Node-Name` будет чередоваться
-  `node-1` / `node-2` (round-robin из `nginx.conf`)
-- `curl http://localhost:8080/visits` — счётчик общий независимо от того,
-  какая нода ответила
+- Ноды опубликованы напрямую: `http://localhost:8001` (`node-1`) и
+  `http://localhost:8002` (`node-2`). Балансировщика в compose нет.
+- `curl -i http://localhost:8001/bench` и `curl -i http://localhost:8002/bench` —
+  в заголовке `X-Node-Name` будет `node-1` / `node-2`
+- `curl http://localhost:8001/visits`, затем `curl http://localhost:8002/visits` —
+  счётчик общий независимо от того, какая нода ответила
 
 ### Проверка отказоустойчивости
 
 ```bash
-# счётчик увеличивается через балансировщик
-curl -s http://localhost:8080/visits
+# счётчик увеличивается на первой ноде
+curl -s http://localhost:8001/visits
 
 # «роняем» одну ноду
 docker compose stop app1
 
-# балансировщик продолжает отвечать через app2, счётчик не сбросился
-curl -s http://localhost:8080/visits
+# вторая нода продолжает отвечать, счётчик не сбросился
+curl -s http://localhost:8002/visits
 
 # поднимаем ноду обратно
 docker compose start app1
@@ -141,17 +141,14 @@ docker compose start app1
 
 ## Подключение TLS и дальнейшее развитие
 
-- Заменить `nginx.conf` на конфигурацию с `listen 443 ssl` и сертификатами
-  (Let's Encrypt / самоподписанные) — приложение менять не требуется.
-- Для демонстрации L4-балансировки можно использовать `stream {}`-блок
-  Nginx или `mod_proxy_balancer` Apache — приложение одинаково работает
-  в обоих случаях, так как ничего не знает о транспортном уровне.
+- Поставить перед нодами Apache (`mod_proxy_balancer`) с `VirtualHost *:443`,
+  сертификатами (Let's Encrypt / самоподписанные) и `SSLEngine on` — приложение
+  менять не требуется. Готовые шаблоны — в `docs/agents/recipes.md`.
 - Для DNS-балансировки — добавить несколько A-записей, указывающих на
-  разные инстансы Nginx/приложения, либо использовать round-robin DNS
+  разные инстансы Apache/приложения, либо использовать round-robin DNS
   перед балансировщиком.
 - Масштабировать количество нод: `docker compose up --scale app1=1 --scale app2=1`
-  либо добавить в `docker-compose.yml` ещё сервисы `app3`, `app4` и
-  прописать их в `upstream` в `nginx.conf`.
+  либо добавить в `docker-compose.yml` ещё сервисы `app3`, `app4` и прописать их в `BalancerMember` Apache.
 
 ## Зависимости и тесты
 

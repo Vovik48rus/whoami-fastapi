@@ -1,13 +1,13 @@
 version: "3.9"
 
 # Демонстрационная схема развёртывания:
-#   client -> nginx (L7, round-robin, без TLS-логики в самом приложении)
-#              -> whoami-node-1 (FastAPI)
-#              -> whoami-node-2 (FastAPI)
+#   client -> whoami-node-1 (FastAPI, хост :8001)
+#   client -> whoami-node-2 (FastAPI, хост :8002)
+#   (реверс-прокси в этом compose нет; при необходимости Apache ставится снаружи)
 #   обе ноды приложения используют ОБЩИЙ внешний PostgreSQL для счётчиков/сессий.
 #
 # TLS в этом compose сознательно не настроен: сертификаты и SSL-терминация
-# выполняются на уровне реверс-прокси (Nginx/Apache).
+# выполняются на уровне реверс-прокси (Apache).
 
 services:
   postgres:
