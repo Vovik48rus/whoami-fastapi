@@ -25,5 +25,5 @@ EXPOSE 8000
 
 # Приложение слушает только HTTP: uvicorn запускается без
 # --ssl-keyfile/--ssl-certfile — TLS/SSL-терминация выполняется на
-# Apache/Nginx перед этим контейнером.
+# Apache перед этим контейнером.
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

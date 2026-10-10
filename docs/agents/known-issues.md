@@ -5,12 +5,10 @@ your task touches one, account for it and update its entry.
 
 ## Docs and config drift
 
+K1-K4 (README/compose drift around a proxy service that does not exist) were removed; the IDs are not reused.
+
 | ID | Problem | Fix |
 |----|---------|-----|
-| K1 | `README.md` describes "2 nodes + PostgreSQL + Nginx" on `:8080`, but `docker-compose.yml` has no nginx service; nodes are on `8001`/`8002`. README commands using `localhost:8080` fail out of the box | Restore the service (`operations.md`, option A) or fix the README |
-| K2 | The header comment in `docker-compose.yml` mentions nginx, which is not there | Align with K1 |
-| K3 | README suggests `docker compose up --scale app1=1 --scale app2=1`: a no-op, and real scaling is blocked by `container_name` and fixed `ports` | Use explicit services (`recipes.md`) |
-| K4 | `nginx.conf` upstreams `app1:8000`/`app2:8000` resolve only inside the compose network | On a host use `127.0.0.1:8001` / `:8002` or real addresses |
 | K5 | `Settings.port` (`PORT`) is never used; the port is in the Dockerfile `CMD` | Remove it or wire it to the `CMD` |
 | K6 | `.env` is never loaded by the app (`.env.example` is reference only and now lists every variable, including the PostgreSQL timeouts). `docker compose` reads a project `.env` only for `${...}` substitution such as `POSTGRES_PASSWORD` | Document manual export |
 | K7 | `version: "3.9"` in compose is obsolete; Compose v2 warns | Harmless; the line can go |
