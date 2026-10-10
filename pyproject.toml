@@ -1,0 +1,28 @@
+[project]
+name = "whoami-fastapi"
+version = "1.0.0"
+description = "FastAPI-аналог traefik/whoami: идентификация ноды и эхо заголовков запроса"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.115.0",
+    "uvicorn[standard]==0.30.6",
+    "sqlalchemy[asyncio]==2.0.35",
+    "asyncpg==0.30.0",
+    "pydantic==2.9.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "httpx",
+]
+
+[tool.uv]
+# Приложение, а не библиотека: сам проект не собирается и не устанавливается,
+# uv ставит только зависимости.
+package = false
+
+[tool.pytest.ini_options]
+# Корень репозитория в sys.path, чтобы `uv run pytest` видел пакет app.
+pythonpath = ["."]
+testpaths = ["tests"]

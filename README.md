@@ -14,8 +14,11 @@ whoami-fastapi/
 ├── app/
 │   ├── main.py          # FastAPI-приложение и все эндпоинты
 │   ├── config.py         # конфигурация через переменные окружения
-│   └── db_client.py      # клиент внешнего хранилища (PostgreSQL) с обработкой ошибок
-├── requirements.txt
+│   ├── models.py         # ORM-модели SQLAlchemy: схема таблиц PostgreSQL
+│   └── db_client.py      # клиент внешнего хранилища (PostgreSQL, async ORM) с обработкой ошибок
+├── pyproject.toml        # зависимости проекта (uv)
+├── uv.lock               # зафиксированные версии всех зависимостей (uv)
+├── .python-version       # версия Python для uv
 ├── Dockerfile
 ├── docker-compose.yml    # 2 ноды приложения + PostgreSQL + Nginx-балансировщик
 ├── nginx.conf            # пример L7-балансировки (round-robin)
@@ -59,9 +62,13 @@ whoami-fastapi/
 `/visits/recent`, `/session`), отвечают `503` с понятным сообщением, а не роняют
 всё приложение: `/`, `/api`, `/health` продолжают работать. Когда база
 возвращается, ноды перезапускать не нужно.
+Доступ к данным идёт через асинхронный ORM SQLAlchemy 2.0 (драйвер asyncpg):
+таблицы описаны моделями в `app/models.py`, а все запросы собраны в методах
+`DatabaseManager` (`app/db_client.py`), эндпоинты ORM напрямую не используют.
 Таблицы (`whoami_counters`, `whoami_recent_requests`, `whoami_sessions`)
-приложение создаёт само при первом успешном подключении, отдельных
-миграций и init-скриптов нет. Счётчик и лог запросов обновляются одной
+приложение создаёт само из моделей при первом успешном подключении,
+отдельных миграций и init-скриптов нет (`create_all` не изменяет уже
+существующие таблицы). Счётчик и лог запросов обновляются одной
 транзакцией.
 Для продакшн-уровня отказоустойчивости самого PostgreSQL (а не только нод
 приложения) в реальном развёртывании стоит использовать репликацию с
@@ -85,16 +92,18 @@ HTTPS-листенер добавляются позже на уровне Nginx
 
 ## Локальный запуск (без Docker)
 
+Зависимости управляются через [uv](https://docs.astral.sh/uv/)
+(`pyproject.toml` + `uv.lock`); Python 3.12 берётся из `.python-version`.
+
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+uv sync    # создаёт .venv строго по uv.lock; активировать его не нужно
 
 # отдельно поднять PostgreSQL, например:
 docker run --rm -p 5432:5432 -e POSTGRES_DB=whoami -e POSTGRES_USER=whoami \
   -e POSTGRES_PASSWORD=whoami postgres:16-alpine
 
 export POSTGRES_HOST=localhost POSTGRES_PASSWORD=whoami
-NODE_NAME=local-dev uvicorn app.main:app --reload
+NODE_NAME=local-dev uv run uvicorn app.main:app --reload
 ```
 
 ## Запуск демо-стенда (2 ноды + PostgreSQL + Nginx)
@@ -143,3 +152,15 @@ docker compose start app1
 - Масштабировать количество нод: `docker compose up --scale app1=1 --scale app2=1`
   либо добавить в `docker-compose.yml` ещё сервисы `app3`, `app4` и
   прописать их в `upstream` в `nginx.conf`.
+
+## Зависимости и тесты
+
+```bash
+uv add sqlalchemy==2.0.35      # добавить зависимость (обновит pyproject.toml и uv.lock)
+uv lock                        # пересобрать uv.lock после ручной правки pyproject.toml
+uv run pytest -q -rs           # тесты (нужен доступный PostgreSQL, см. docs/agents/testing.md)
+```
+
+Docker-образ ставит зависимости командой `uv sync --locked --no-dev`: сборка падает,
+если `uv.lock` не соответствует `pyproject.toml`, а dev-зависимости (pytest) в образ
+не попадают.

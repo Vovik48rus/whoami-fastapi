@@ -10,7 +10,10 @@ with `nginx -t` or `apachectl configtest`.
    sessions, helpers).
 2. If it does work or touches data, return `served_by_node`. If it uses the database,
    add a method to `DatabaseManager` (rules in `reference.md`), follow the 503 pattern
-   from `AGENTS.md` and document any new table or column in `reference.md`.
+   from `AGENTS.md`. A new table needs an ORM model in `app/models.py` (it is created
+   by `create_all` on a node's first database connection, also in a database that already
+   has the other tables; existing tables are never altered, see K26). Document it in
+   `reference.md`.
 3. Add a row to the endpoint table in `README.md` and `reference.md`.
 4. Run the smoke test.
 
@@ -20,6 +23,14 @@ with `nginx -t` or `apachectl configtest`.
 2. Add it to `.env.example`, the README, and the table in `reference.md`.
 3. If it differs per node, set it under `environment:` of that service in
    `docker-compose.yml`. Never bake node differences into the image.
+
+## Add a dependency
+
+1. `uv add <package>==<version>` (use `--dev` for test tooling). It edits
+   `pyproject.toml` and `uv.lock` together; commit both.
+2. Pin runtime packages with `==`, like the existing ones. Ask first (`AGENTS.md`).
+3. `uv run pytest -q -rs` and rebuild the image: `uv sync --locked --no-dev` fails
+   if the two files disagree.
 
 ## Add a third node
 

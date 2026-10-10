@@ -51,17 +51,19 @@ exceptions (500) the headers may be missing because the middleware does not catc
 
 ## Database schema
 
-Tables are created by the app itself (`CREATE TABLE IF NOT EXISTS` under an advisory
-lock, on the first successful connection), so there are no migration files. Prefix every
-table with `whoami_` and document new ones here. Give unbounded tables a TTL column or a
-row cap. A change to an existing table is a contract change: ask first, because
-`IF NOT EXISTS` will not alter a table that already exists in a live database.
+The schema is defined once, as ORM models in `app/models.py` (SQLAlchemy 2.0 typed style,
+declarative `Base`). The app creates the tables itself (`Base.metadata.create_all` under
+an advisory lock, on the first successful connection), so there are no migration files.
+Prefix every table with `whoami_`, add a model for each new one and document it here.
+Give unbounded tables a TTL column or a row cap. A change to an existing model is a
+contract change: ask first, because `create_all` never alters a table that already
+exists in a live database.
 
-| Table | Columns | Purpose | Retention |
-|-------|---------|---------|-----------|
-| `whoami_counters` | `name text PK`, `value bigint` | named counters; `global:visits` is behind `/visits` | none |
-| `whoami_recent_requests` | `id bigserial PK`, `created_at timestamptz`, `node text`, `client text` | request log behind `/visits/recent`; served as `ISO-time node=<id> client=<ip>` | capped at 20 rows by a `DELETE` in the same transaction as the insert |
-| `whoami_sessions` | `session_id text PK`, `hits bigint`, `expires_at timestamptz` (index on `expires_at`) | hits in a session | sliding: every hit sets `expires_at = now() + SESSION_TTL_SECONDS`; expired rows are deleted by a background task |
+| Table (model) | Columns | Purpose | Retention |
+|---------------|---------|---------|-----------|
+| `whoami_counters` (`Counter`) | `name text PK`, `value bigint` | named counters; `global:visits` is behind `/visits` | none |
+| `whoami_recent_requests` (`RecentRequest`) | `id bigserial PK`, `created_at timestamptz`, `node text`, `client text` | request log behind `/visits/recent`; served as `ISO-time node=<id> client=<ip>` | capped at 20 rows by a `DELETE` in the same transaction as the insert |
+| `whoami_sessions` (`SessionRow`) | `session_id text PK`, `hits bigint`, `expires_at timestamptz` (index `whoami_sessions_expires_idx`) | hits in a session | sliding: every hit sets `expires_at = now() + SESSION_TTL_SECONDS`; expired rows are deleted by a background task |
 
 Session cookie: `httponly`, `samesite=lax`, `secure` = `SESSION_COOKIE_SECURE`,
 `max_age` = `SESSION_TTL_SECONDS`. The value is `uuid4().hex` unless the client sent
@@ -72,47 +74,59 @@ yet is treated as absent: the next hit resets `hits` to 1. The purge task runs o
 node every `SESSION_PURGE_INTERVAL_SECONDS`; the `DELETE` is idempotent, so running it
 on several nodes is safe.
 
-## Database layer (`app/db_client.py`)
+## Database layer (`app/models.py`, `app/db_client.py`)
 
-`DatabaseManager` keeps a lazily created `asyncpg` pool (min 1, max
-`POSTGRES_POOL_MAX`) and hands out connections through the private `_conn()` context
-manager. Public methods are domain-level, each one a complete unit of work:
+`DatabaseManager` creates a SQLAlchemy `AsyncEngine` lazily (driver `asyncpg`; URL built
+with `URL.create`, so special characters in the password are safe) and hands out
+`AsyncSession` objects through the private `_session()` context manager. Public
+methods are domain-level, each one a complete unit of work in one transaction:
 `ping`, `record_visit`, `recent_visits`, `session_hit`, `purge_expired_sessions`,
-`close`. Handlers never see a connection or write SQL; `main.py` must not import `asyncpg`.
+`close`. Handlers never see a session or write a query; `main.py` must not import
+`sqlalchemy` or `asyncpg`.
 
 Rules for new methods:
 
-1. Get the connection only through `async with self._conn() as conn:`. It converts
-   `asyncpg.PostgresError`, `asyncpg.InterfaceError`, `OSError` and `TimeoutError` into
-   `StorageUnavailable`, including errors raised by the query inside the block.
-   `OSError` matters: socket and DNS failures are not `PostgresError`.
-2. Use parameters (`$1`, `$2`), never f-strings, for any value; keep SQL in module
-   constants next to the others.
-3. Wrap statements that must succeed or fail together in `async with conn.transaction():`.
-4. Do the whole read-modify-write in SQL (`INSERT ... ON CONFLICT DO UPDATE ... RETURNING`),
-   not as read-then-write in Python: several nodes run it at once.
+1. Get the session only through `async with self._session() as session:`. It opens a
+   transaction (commit on exit, rollback on error) and converts `SQLAlchemyError`
+   (driver errors, pool exhaustion), `OSError` and `TimeoutError` into
+   `StorageUnavailable`, including errors raised by a query inside the block.
+   `OSError` matters: SQLAlchemy does not wrap socket and DNS failures.
+2. Write queries with the ORM/expression API, never with strings or f-strings; values
+   are bound parameters. Put the model in `app/models.py` first.
+3. Do the whole read-modify-write in one statement
+   (`pg_insert(Model).on_conflict_do_update(...).returning(...)`), not as
+   read-then-write in Python: several nodes run it at once. Use `session.scalar(...)`
+   for one value, `session.scalars(...)` for rows.
+4. Never return ORM objects from a method: sessions are closed on exit and the objects
+   are not safe to use outside the transaction. Return plain values.
 5. `ping()` is the exception: it returns a `bool` and never raises.
 
 ```python
 async def get_counter(self, name: str) -> int:
-    async with self._conn() as conn:
-        value = await conn.fetchval("SELECT value FROM whoami_counters WHERE name = $1", name)
+    async with self._session() as session:
+        value = await session.scalar(select(Counter.value).where(Counter.name == name))
     return int(value or 0)
 ```
 
 Behavior worth knowing:
 
-- The pool is created on first use, not at startup. If PostgreSQL is down at boot the
+- The engine is created on first use, not at startup. If PostgreSQL is down at boot the
   app still starts, every data call returns 503, and the first call after the database
-  returns creates the pool and the schema. Nothing needs a restart (verified).
-- `POSTGRES_CONNECT_TIMEOUT` bounds connecting and waiting for a free pooled connection;
-  `POSTGRES_COMMAND_TIMEOUT` bounds each query. Both default to 1 s.
+  returns creates the schema and works. Nothing needs a restart (verified).
+- Pool: `pool_size = POSTGRES_POOL_MAX`, no overflow, `pool_pre_ping=True` (a dead
+  connection after a PostgreSQL restart is replaced instead of failing a request; costs one
+  extra round trip per checkout). `POSTGRES_CONNECT_TIMEOUT` bounds connecting and
+  waiting for a free pooled connection; `POSTGRES_COMMAND_TIMEOUT` bounds each query.
+- The `reason` in a 503 is the driver's message only. `str()` of a SQLAlchemy `DBAPIError`
+  contains the SQL text and bound parameters (session ids), so `_reason()` unwraps `.orig`.
+  Keep that when touching error handling.
 - `lifespan` in `app/main.py` starts the purge task and, on shutdown, cancels it and
-  closes the pool (`db_manager.close()`).
-- The pool is a module-level singleton bound to one event loop.
+  disposes the engine (`db_manager.close()`).
+- The engine is a module-level singleton and its pool is bound to one event loop.
 - `record_visit` is atomic, but every `/visits` call locks the same counter row until
-  commit, so `/visits` throughput is serialized by design (fine for a lab; do not use it
-  as a benchmark target, use `/bench`).
+  commit, so concurrent calls queue (K27). With 20 parallel requests on a single CPU the
+  queue reached about 2 s, which is why `POSTGRES_COMMAND_TIMEOUT` defaults to 3 s.
+  Use `/bench`, not `/visits`, as a benchmark target.
 
 ## Environment variables
 
@@ -126,8 +140,8 @@ Behavior worth knowing:
 | `POSTGRES_USER` | `whoami` | needs `CREATE` on the database (the app creates its tables) |
 | `POSTGRES_PASSWORD` | none | empty means no password; compose passes `${POSTGRES_PASSWORD:-whoami}` |
 | `POSTGRES_CONNECT_TIMEOUT` | `1.0` s | connect and pool-acquire timeout; short on purpose so failures return 503 fast; may cause false 503s on a slow database |
-| `POSTGRES_COMMAND_TIMEOUT` | `1.0` s | per-query timeout |
-| `POSTGRES_POOL_MAX` | `10` | per node; keep `nodes * POSTGRES_POOL_MAX` below PostgreSQL `max_connections` (default 100) |
+| `POSTGRES_COMMAND_TIMEOUT` | `3.0` s | per-query timeout; also covers waiting on the counter row lock under load |
+| `POSTGRES_POOL_MAX` | `10` | pool size per node, no overflow; keep `nodes * POSTGRES_POOL_MAX` below PostgreSQL `max_connections` (default 100) |
 | `SESSION_TTL_SECONDS` | `3600` | `expires_at` offset and cookie `max_age`; sliding |
 | `SESSION_PURGE_INTERVAL_SECONDS` | `60` | how often each node deletes expired sessions |
 | `SESSION_COOKIE_NAME` | `whoami_session` | |

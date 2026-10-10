@@ -39,10 +39,12 @@ class Settings:
 
     # Таймауты, чтобы при падении PostgreSQL приложение не подвисало,
     # а быстро отвечало ошибкой 503 конкретному эндпоинту.
-    # connect_timeout ограничивает и установку соединения, и ожидание
-    # свободного соединения из пула; command_timeout - выполнение запроса.
+    # connect_timeout ограничивает установку соединения и ожидание свободного
+    # соединения из пула; command_timeout - выполнение запроса. Он больше,
+    # потому что запросы к /visits выстраиваются в очередь на блокировке одной
+    # строки счётчика: под нагрузкой ожидание доходит до пары секунд.
     postgres_connect_timeout: float = float(os.getenv("POSTGRES_CONNECT_TIMEOUT", "1.0"))
-    postgres_command_timeout: float = float(os.getenv("POSTGRES_COMMAND_TIMEOUT", "1.0"))
+    postgres_command_timeout: float = float(os.getenv("POSTGRES_COMMAND_TIMEOUT", "3.0"))
 
     # Максимальный размер пула соединений на одну ноду. Учитывайте
     # max_connections самого PostgreSQL (по умолчанию 100) * число нод.

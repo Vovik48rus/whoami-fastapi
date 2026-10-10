@@ -2,7 +2,7 @@
 
 ## Current state
 
-The repo has no automated tests, CI, linter, formatter, lock file or `.dockerignore`.
+The repo has no automated tests, CI, linter, formatter or `.dockerignore`.
 Verification is manual (smoke test in `AGENTS.md`, scenarios in `operations.md`).
 Do not claim tests passed unless you added and ran them.
 
@@ -15,13 +15,10 @@ setup was run against the current code on PostgreSQL 16: 7 tests passed. Without
 reachable database the tests that need it are **skipped, which is not a pass**; read
 the `-rs` output.
 
-Keep dev dependencies out of `requirements.txt` (it goes into the image); use a
-separate `requirements-dev.txt`:
-
-```text
-pytest
-httpx
-```
+Dev dependencies (`pytest`, `httpx`) live in the `dev` dependency group of
+`pyproject.toml`. `uv sync` installs it by default; the Docker image uses
+`uv sync --locked --no-dev`, so it never reaches the image. `asyncpg` (the driver) is
+a runtime dependency, so the test file can use it directly for setup.
 
 Start a throwaway database and export the connection variables before pytest starts
 (`Settings` reads them at import time):
@@ -30,7 +27,7 @@ Start a throwaway database and export the connection variables before pytest sta
 docker run -d --name whoami-pg-test -p 5432:5432 \
   -e POSTGRES_DB=whoami -e POSTGRES_USER=whoami -e POSTGRES_PASSWORD=whoami postgres:16-alpine
 export POSTGRES_HOST=localhost POSTGRES_PASSWORD=whoami
-python -m pytest -q -rs
+uv run pytest -q -rs
 ```
 
 The fixture drops the three `whoami_*` tables before every test, so **never point it at
@@ -132,7 +129,7 @@ def test_storage_down_gives_503_but_app_alive(monkeypatch):
     async def boom():
         raise OSError("db down")
 
-    monkeypatch.setattr(db_manager, "_get_pool", boom)
+    monkeypatch.setattr(db_manager, "_get_sessionmaker", boom)
     with TestClient(app) as c:
         assert c.get("/health").status_code == 200
         assert c.get("/api").status_code == 200
@@ -143,16 +140,17 @@ def test_storage_down_gives_503_but_app_alive(monkeypatch):
         assert c.get("/session").status_code == 503
 ```
 
-Run from the repo root: `python -m pytest -q -rs`. The last test needs no database
+Run from the repo root: `uv run pytest -q -rs`. The last test needs no database
 and runs even when the others are skipped.
 
 ## Pitfalls
 
-- To simulate "database down", patch `db_manager._get_pool` (it is called inside the
-  `try`, so any `OSError` becomes `StorageUnavailable`). Do not build a second pool.
-- The pool is bound to the event loop that created it. `with TestClient(app)` runs
-  one loop for the whole block and the `lifespan` shutdown closes the pool, so use the
-  `with` form every time; a client created without it would reuse a pool from a dead loop.
+- To simulate "database down", patch `db_manager._get_sessionmaker` (it is called inside
+  the `try`, so any `OSError` becomes `StorageUnavailable`). Do not build a second engine.
+- The engine's connection pool is bound to the event loop that created it.
+  `with TestClient(app)` runs one loop for the whole block and the `lifespan` shutdown
+  disposes the engine, so use the `with` form every time; a client created without it
+  would reuse connections from a dead loop.
 - `lifespan` also starts the session-purge task. It sleeps
   `SESSION_PURGE_INTERVAL_SECONDS` (60 s) before the first purge, so it does not
   interfere with tests; to test purging, call `await db_manager.purge_expired_sessions()`.
@@ -164,6 +162,9 @@ and runs even when the others are skipped.
 - `TestClient` sends no proxy headers; pass them yourself
   (`headers={"X-Forwarded-For": "203.0.113.5"}`).
 - Tests do not cover compose DNS, Nginx `max_fails`, or container stop/start. Those need Docker.
+- Do not load-test `/visits` in a test: every call updates one counter row, so
+  concurrent calls queue up (K27). A burst of 20 parallel requests per node on a single
+  CPU needed `POSTGRES_COMMAND_TIMEOUT` above 2 s to avoid occasional 503s.
 
 ## What to cover when changing code
 

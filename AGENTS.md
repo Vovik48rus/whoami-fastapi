@@ -8,18 +8,24 @@ The goal is infrastructure artifacts, not a rich app — keep the code small.
 
 ## Stack
 
-- Python 3.12 (`python:3.12-slim`; code needs >= 3.10 for `X | None`)
-- FastAPI 0.115.0, uvicorn[standard] 0.30.6, asyncpg 0.30.0,
-  pydantic 2.9.2 (pinned, not used directly)
+- Python 3.12 (`python:3.12-slim`, `.python-version`; `requires-python = ">=3.12"`)
+- FastAPI 0.115.0, uvicorn[standard] 0.30.6, SQLAlchemy 2.0.35 (async ORM) with the
+  asyncpg 0.30.0 driver, pydantic 2.9.2 (pinned, not used directly)
+- uv 0.12.24 for dependencies: `pyproject.toml` + `uv.lock` (no `requirements.txt`)
 - PostgreSQL 16 (`postgres:16-alpine`, named volume) as the only shared state
 - Nginx 1.27 as the reverse proxy (`nginx.conf`; not a service in compose)
 
 ## Commands
 
 ```bash
-# setup (Windows: .venv\Scripts\activate; PowerShell env: $env:NODE_NAME="dev")
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+# setup: creates .venv from uv.lock, including the dev group (pytest, httpx).
+# No activation needed: `uv run` uses the project environment on every OS.
+# (PowerShell env: $env:NODE_NAME="dev")
+uv sync
+
+# dependencies: edit through uv so pyproject.toml and uv.lock stay in sync
+uv add <package>==<version>     # runtime;  add --dev for pytest-like tools
+uv lock                         # re-resolve after editing pyproject.toml by hand
 
 # PostgreSQL for local runs (the app creates its own tables)
 docker run -d --name whoami-pg-dev -p 5432:5432 -e POSTGRES_DB=whoami \
@@ -27,11 +33,11 @@ docker run -d --name whoami-pg-dev -p 5432:5432 -e POSTGRES_DB=whoami \
 export POSTGRES_HOST=localhost POSTGRES_PASSWORD=whoami
 
 # one node with reload
-NODE_NAME=dev uvicorn app.main:app --reload --port 8000
+NODE_NAME=dev uv run uvicorn app.main:app --reload --port 8000
 
 # two nodes sharing one PostgreSQL (no Docker needed for the app)
-NODE_NAME=node-1 uvicorn app.main:app --port 8001
-NODE_NAME=node-2 uvicorn app.main:app --port 8002
+NODE_NAME=node-1 uv run uvicorn app.main:app --port 8001
+NODE_NAME=node-2 uv run uvicorn app.main:app --port 8002
 
 # full stack: postgres + app1 (:8001) + app2 (:8002). There is NO nginx service.
 docker compose up --build -d
@@ -44,7 +50,7 @@ curl -s -o /dev/null -D - localhost:8001/bench | grep -i '^x-node'   # 3 X-Node-
 curl -s localhost:8001/api                                     # node identity + echoed headers
 
 # tests: none committed yet — see docs/agents/testing.md
-python -m pytest -q
+uv run pytest -q -rs
 ```
 
 Expected with PostgreSQL stopped: `/`, `/api`, `/health` -> 200; `/health/ready`,
@@ -54,8 +60,12 @@ Expected with PostgreSQL stopped: `/`, `/api`, `/health` -> 200; `/health/ready`
 
 **Always**
 - Keep state shared between requests in PostgreSQL, accessed only through
-  `app/db_client.py` (`DatabaseManager`; handlers never touch connections or SQL).
-  Database and socket errors become `StorageUnavailable` there.
+  `app/db_client.py` (`DatabaseManager`; handlers never touch engines, sessions or
+  queries). Database and socket errors become `StorageUnavailable` there.
+- Describe every table as an ORM model in `app/models.py`; it is the only source of
+  the schema. Write queries with the SQLAlchemy ORM/expression API (`select`, `delete`,
+  `pg_insert(...).on_conflict_do_update`), inside `DatabaseManager._session()`.
+- Add dependencies with `uv add` and commit `uv.lock` together with `pyproject.toml`.
 - Turn `StorageUnavailable` into a `503` JSON response (shape below), never a 500.
 - Put `served_by_node` in the JSON of every endpoint that does work. The
   `X-Node-Name/Hostname/Pid` middleware stays on all responses.
@@ -70,8 +80,9 @@ Expected with PostgreSQL stopped: `/`, `/api`, `/health` -> 200; `/health/ready`
 - Changing a public contract: paths, JSON field names, `X-Node-*` headers, the 503
   shape, or existing table/column names and formats.
 - Adding dependencies, a second datastore, auth or rate limiting.
-- Changing the schema of an existing table: the app only runs `CREATE TABLE IF NOT EXISTS`,
-  so a live database keeps the old definition and there are no migrations.
+- Changing the schema of an existing table (editing a model in `app/models.py`): the app
+  only runs `create_all`, so a live database keeps the old definition and there are no
+  migrations (adding Alembic is also a new dependency: ask first).
 - Changing ports, service/container names or the compose network.
 - Reformatting files or converting line endings.
 - Fixing anything from `docs/agents/known-issues.md` that you were not asked to fix.
@@ -82,8 +93,11 @@ Expected with PostgreSQL stopped: `/`, `/api`, `/health` -> 200; `/health/ready`
 - Handle TLS in the app: no `--ssl-*` flags, certificates, keys or HTTPS redirects.
   TLS terminates on Nginx/Apache.
 - Store sessions anywhere but PostgreSQL (no in-memory, file or client-side cookie sessions).
-- Open database connections or pools outside `db_client.py`, build SQL with f-strings,
-  or block the event loop (`time.sleep`, `requests`, sync drivers such as `psycopg2`).
+- Create engines or sessions outside `db_client.py`, import `sqlalchemy`/`asyncpg` in
+  `main.py`, write raw SQL strings or build SQL with f-strings (use the ORM/expression
+  API; `text()` only for something it cannot express), or block the event loop
+  (`time.sleep`, `requests`, sync drivers such as `psycopg2`, sync `Session`).
+- Edit `uv.lock` by hand, or install with `pip` into the project environment.
 - Add `--workers` to uvicorn, sticky sessions, or per-node logic like `if NODE_NAME == ...`.
 - Use `/visits`, `/session` or `/health/ready` as a load-balancer health check
   (they mutate state or depend on PostgreSQL). Use `/health`.
@@ -94,8 +108,9 @@ Expected with PostgreSQL stopped: `/`, `/api`, `/health` -> 200; `/health/ready`
 No formatter or linter is configured. Match the surrounding code; do not reformat
 unrelated lines. Type-hint everything. Comments and docstrings are in Russian
 (match that); identifiers, JSON keys, table and column names are English. Tables use
-the `whoami_` prefix. SQL lives in module-level constants in `db_client.py` and takes
-values as `$n` parameters.
+the `whoami_` prefix. Models use SQLAlchemy 2.0 typed style (`Mapped[...]`,
+`mapped_column`). Queries live only in `DatabaseManager` methods and pass values as
+bound parameters, never string-formatted.
 
 A data endpoint looks like this:
 
@@ -118,13 +133,15 @@ async def example() -> JSONResponse:
 ```
 
 Do not write `except Exception: pass` around database calls, and do not import
-`asyncpg` or call `asyncpg.connect(...)` from `main.py`.
+`sqlalchemy` or `asyncpg` from `main.py`.
 
 ## Where things live
 
 - `app/main.py` — all endpoints, node identity (`NODE_ID`), `X-Node-*` middleware, `lifespan` (session purge task, pool shutdown)
-- `app/db_client.py` — `DatabaseManager` (lazy asyncpg pool, 1 s timeouts, schema creation, all SQL), `StorageUnavailable`
+- `app/models.py` — SQLAlchemy ORM models (`Counter`, `RecentRequest`, `SessionRow`): the schema
+- `app/db_client.py` — `DatabaseManager` (lazy async engine, timeouts, schema creation, all queries), `StorageUnavailable`
 - `app/config.py` — `Settings` dataclass
+- `pyproject.toml`, `uv.lock`, `.python-version` — dependencies and interpreter (uv)
 - `nginx.conf` — upstream + server fragment for `conf.d/`, not a full nginx config
 
 ## Gotchas (not discoverable from the code alone)
@@ -144,10 +161,15 @@ Do not write `except Exception: pass` around database calls, and do not import
 - `container_id` is often `null` on cgroup v2; identity falls back to the hostname.
 - The compose healthcheck uses `python -c urllib...` because the slim image has no `curl`.
 - `GET /visits` increments the counter on every call, including prefetch and scanners.
-- The schema is created by the app on the first successful connection (advisory lock,
-  `IF NOT EXISTS`), so a fresh database needs no init script. The database user needs
-  `CREATE` on it. PostgreSQL has no TTL: sessions expire via `expires_at` and a per-node
-  purge task (`lifespan`).
+- The schema is created from the ORM models on the first successful connection
+  (`Base.metadata.create_all` under an advisory lock), so a fresh database needs no init
+  script. The database user needs `CREATE` on it. `create_all` never alters an existing
+  table (no migrations). PostgreSQL has no TTL: sessions expire via `expires_at` and a
+  per-node purge task (`lifespan`).
+- `uv run` syncs the environment first. The Docker image uses `uv sync --locked --no-dev`,
+  which fails if `uv.lock` does not match `pyproject.toml`: run `uv lock` after editing it.
+- `/visits` queues on one counter row. Under heavy parallel load the wait is what
+  `POSTGRES_COMMAND_TIMEOUT` (3 s) has to cover; a false 503 there is a timeout, not an outage.
 - The `/health/ready` JSON field is `postgres` (it was `redis` before the migration).
 
 ## Git
@@ -161,4 +183,4 @@ per commit, and mention in the body which boundary above the change touches.
 - `docs/agents/operations.md` — compose, failure scenarios, PostgreSQL inspection, Nginx pitfalls
 - `docs/agents/recipes.md` — new endpoint/env var/node, TLS, L4 stream, Apache, DNS round-robin
 - `docs/agents/testing.md` — verified pytest setup against a real PostgreSQL and its pitfalls
-- `docs/agents/known-issues.md` — documented problems and doc/config drift (K1..K25)
+- `docs/agents/known-issues.md` — documented problems and doc/config drift (K1..K29)

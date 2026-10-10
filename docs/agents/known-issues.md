@@ -43,15 +43,16 @@ your task touches one, account for it and update its entry.
 
 | ID | Problem |
 |----|---------|
-| K22 | No tests, CI, linter/formatter, lock file or `.dockerignore` (the build context includes `.git`/`.venv`, but only `requirements.txt` and `app/` reach the image) |
+| K22 | No tests, CI, linter/formatter or `.dockerignore` (the build context includes `.git`/`.venv`, but only `pyproject.toml`, `uv.lock`, `.python-version` and `app/` reach the image). The lock file now exists: `uv.lock` |
 | K23 | All files are CRLF. Keep each file's endings; shell scripts, if ever added, must be LF; a `.env` copied from `.env.example` inherits CRLF |
 | K24 | The Dockerfile has no `HEALTHCHECK` (compose defines one) |
-| K25 | Transitive dependencies are not pinned |
+| K25 | ~~Transitive dependencies are not pinned~~ Fixed by the move to uv: `uv.lock` pins all 30 packages, and the image installs with `--locked` |
 
 ## PostgreSQL storage
 
 | ID | Problem | Notes |
 |----|---------|-------|
-| K26 | No migrations: the app runs `CREATE TABLE IF NOT EXISTS`, so changing a column in code does not change a database that already has the table | Fine for a lab; for schema changes use `docker compose down -v`, or add real migrations (ask first) |
-| K27 | Every `/visits` call updates one counter row and holds its lock until commit, so `/visits` throughput is serialized across all nodes | By design for a shared counter; benchmark with `/bench`, not `/visits` |
-| K28 | Not run in compose: the Dockerfile build with `asyncpg`, the `postgres:16-alpine` healthcheck and the compose startup order were not exercised. Everything else was run on a local PostgreSQL 16 | Run the smoke test after `docker compose up --build -d` |
+| K26 | No migrations: the app runs `Base.metadata.create_all`. It creates missing tables (verified, also in a live database) but never alters an existing one, so editing a model does not change a database that already has that table | Fine for a lab; for column changes use `docker compose down -v`, or add Alembic (a new dependency: ask first) |
+| K27 | Every `/visits` call updates one counter row and holds its lock until commit, so concurrent calls queue across all nodes. Measured on one CPU with 20 parallel requests over two nodes: waits up to about 2 s; with `POSTGRES_COMMAND_TIMEOUT=1` roughly 2-4 % of requests got a false 503 (the previous raw-asyncpg client under the same load: about 0.4 %), with 3 s none in 1000 | The default is 3 s. By design for a shared counter; benchmark with `/bench`, not `/visits` |
+| K28 | Not run in Docker: the real image build, the `postgres:16-alpine` healthcheck and the compose startup order. The Dockerfile steps were emulated in a clean directory (`pip install uv==0.12.24`, `uv sync --locked --no-dev`, app started from that environment); everything else ran on a local PostgreSQL 16 | Run the smoke test after `docker compose up --build -d` |
+| K29 | `uv.lock` is LF (written by uv) while other repo files are CRLF; `pyproject.toml` is CRLF and uv accepts it (`uv lock --check` and `uv sync --locked` passed). `.python-version` must stay LF: some version managers read a trailing `\r` as part of the version | Do not convert these two files. With `core.autocrlf=true` on Windows git may rewrite them; commit them as LF |
